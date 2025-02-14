@@ -1,0 +1,10 @@
+{
+    "target_latitude": 37.7749,
+    "target_longitude": -122.4194,
+    "target_altitude": 10000.0,
+    "target_speed": 250.0,
+    "max_climb_rate": 2000.0,
+    "max_descent_rate": 1500.0,
+    "max_bank_angle": 25.0,
+    "max_pitch_angle": 15.0
+}

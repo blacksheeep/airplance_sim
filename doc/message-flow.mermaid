@@ -1,0 +1,27 @@
+sequenceDiagram
+    participant GPS as GPS Receiver
+    participant INS as INS
+    participant FC as Flight Controller
+    participant AP as Autopilot
+    participant LR as Landing Radio
+    participant SAT as Satcom
+
+    Note over GPS,SAT: Component Initialization
+    FC->>GPS: Subscribe(POSITION_UPDATE)
+    FC->>INS: Subscribe(POSITION_UPDATE)
+    FC->>LR: Subscribe(POSITION_UPDATE)
+    FC->>AP: Subscribe(AUTOPILOT_COMMAND)
+    FC->>SAT: Subscribe(SYSTEM_STATUS)
+
+    Note over GPS,SAT: Normal Operation
+    GPS->>FC: MSG_POSITION_UPDATE
+    FC->>AP: MSG_STATE_RESPONSE
+    INS->>FC: MSG_POSITION_UPDATE
+    FC->>AP: MSG_STATE_RESPONSE
+    AP->>FC: MSG_AUTOPILOT_COMMAND
+    
+    Note over GPS,SAT: System Status
+    GPS->>FC: MSG_SYSTEM_STATUS
+    INS->>FC: MSG_SYSTEM_STATUS
+    LR->>FC: MSG_SYSTEM_STATUS
+    SAT->>FC: MSG_SYSTEM_STATUS

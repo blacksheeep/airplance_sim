@@ -1,0 +1,40 @@
+graph TB
+    subgraph External ["External Components (Independent Processes)"]
+        GPS_S["GPS Sender\n(TCP 5555)"]
+        LR_S["Landing Radio Sender\n(TCP 5556)"]
+        SAT_S["Ground Station\n(TCP 5557)"]
+    end
+
+    subgraph Main ["Main Process"]
+        FC["Flight Controller"]
+        BUS["Message Bus\n(Shared Memory)"]
+        FC -->|manages| BUS
+        
+        subgraph Components ["Internal Components (Forked Processes)"]
+            AP["Autopilot"]
+            GPS["GPS Receiver"]
+            INS["INS"]
+            LR["Landing Radio"]
+            SAT["Satcom"]
+        end
+
+        GPS -->|position| BUS
+        INS -->|position| BUS
+        LR -->|position| BUS
+        SAT -->|commands| BUS
+        AP -->|commands| BUS
+        BUS -->|state| AP
+        BUS -->|state| INS
+    end
+
+    GPS_S -->|"position data"| GPS
+    LR_S -->|"ILS data"| LR
+    SAT_S -->|"flight plan\nweather\ncommands"| SAT
+
+    classDef process fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef external fill:#bbf,stroke:#333,stroke-width:2px;
+    classDef bus fill:#bfb,stroke:#333,stroke-width:2px;
+    
+    class GPS_S,LR_S,SAT_S external;
+    class FC,AP,GPS,INS,LR,SAT process;
+    class BUS bus;
