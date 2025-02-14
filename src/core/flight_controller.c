@@ -1,4 +1,5 @@
 #include "flight_controller.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -7,7 +8,7 @@
 #include <string.h>
 #include <time.h>
 
-#define MAX_COMPONENTS 5
+#define MAX_COMPONENTS 6  
 
 struct FlightController {
     Bus* bus;
@@ -225,44 +226,45 @@ void flight_controller_process_messages(FlightController* fc) {
 
 ErrorCode flight_controller_start(FlightController* fc) {
     if (!fc) {
-        fprintf(stderr, "NULL flight controller in start\n");
+        LOG_ERROR(LOG_FLIGHT_CTRL, "NULL flight controller in start");
         return ERROR_GENERAL;
     }
-    
+
     // Spawn all components in correct order
     ComponentId components[] = {
-        COMPONENT_AUTOPILOT,    // Must be 1
-        COMPONENT_GPS,          // Must be 2
-        COMPONENT_INS,          // Must be 3
-        COMPONENT_LANDING_RADIO // Must be 4
+        COMPONENT_AUTOPILOT,
+        COMPONENT_GPS,
+        COMPONENT_INS,
+        COMPONENT_LANDING_RADIO,
+        COMPONENT_SAT_COM  // Added SATCOM to the list
     };
-    
+
     size_t num_components = sizeof(components) / sizeof(components[0]);
-    fprintf(stderr, "Starting %zu components...\n", num_components);
-    
+    LOG_INFO(LOG_FLIGHT_CTRL, "Starting %zu components...", num_components);
+
     for (size_t i = 0; i < num_components; i++) {
         ComponentId component = components[i];
-        fprintf(stderr, "Starting component %zu (ID: %d)...\n", i, component);
-        
+        LOG_INFO(LOG_FLIGHT_CTRL, "Starting component %zu (ID: %d)...", i, component);
+
         if (component >= MAX_COMPONENTS) {
-            fprintf(stderr, "Invalid component ID %d (MAX_COMPONENTS is %d)\n", 
+            LOG_ERROR(LOG_FLIGHT_CTRL, "Invalid component ID %d (MAX_COMPONENTS is %d)",
                     component, MAX_COMPONENTS);
             return ERROR_GENERAL;
         }
-        
+
         ErrorCode err = flight_controller_spawn_component(fc, component);
         if (err != SUCCESS) {
-            fprintf(stderr, "Failed to spawn component %d\n", component);
+            LOG_ERROR(LOG_FLIGHT_CTRL, "Failed to spawn component %d", component);
             flight_controller_cleanup(fc);
             return err;
         }
-        
+
         // Small delay between spawns to ensure orderly startup
         usleep(100000);  // 100ms
     }
-    
+
     fc->running = true;
-    fprintf(stderr, "All components started successfully\n");
+    LOG_INFO(LOG_FLIGHT_CTRL, "All components started successfully");
     return SUCCESS;
 }
 

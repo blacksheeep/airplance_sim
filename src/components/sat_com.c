@@ -1,4 +1,5 @@
 #include "sat_com.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,9 @@
 #include <time.h>
 
 #define BUFFER_SIZE 1024
-#define SATCOM_UPDATE_INTERVAL_MS 1000  // 1 Hz update rate
+#define SATCOM_UPDATE_INTERVAL_MS 1000
+#define STATUS_UPDATE_INTERVAL_S 1
+
 
 struct SatCom {
     Bus* bus;
@@ -23,11 +26,19 @@ struct SatCom {
     FlightState current_state;
 };
 
+// Forward declarations of static functions
+static bool init_socket(SatCom* sat);
+static void send_status_update(SatCom* sat, bool connected);
+static bool try_connect(SatCom* sat);
+static bool parse_sat_message(const char* buffer, SatelliteMessage* msg);
+
 // Initialize socket connection
 static bool init_socket(SatCom* sat) {
+    LOG_INFO(LOG_SATCOM, "Initializing socket");
+    
     sat->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sat->socket_fd < 0) {
-        perror("Failed to create socket");
+        LOG_ERROR(LOG_SATCOM, "Failed to create socket: %s", strerror(errno));
         return false;
     }
 
@@ -42,130 +53,58 @@ static bool init_socket(SatCom* sat) {
 
     struct hostent* server = gethostbyname(SATCOM_HOST);
     if (server == NULL) {
-        fprintf(stderr, "Failed to resolve hostname\n");
+        LOG_ERROR(LOG_SATCOM, "Failed to resolve hostname");
         return false;
     }
+    
     memcpy(&sat->server_addr.sin_addr.s_addr, server->h_addr, server->h_length);
-
     return true;
 }
 
-SatCom* sat_com_init(Bus* bus) {
-    if (!bus) return NULL;
-
-    SatCom* sat = malloc(sizeof(SatCom));
-    if (!sat) return NULL;
-
-    sat->bus = bus;
-    sat->connected = false;
-    memset(&sat->last_message, 0, sizeof(SatelliteMessage));
-    memset(&sat->current_state, 0, sizeof(FlightState));
-
-    if (!init_socket(sat)) {
-        free(sat);
-        return NULL;
-    }
-
-    // Subscribe to state updates from flight controller
-    bus_subscribe(bus, COMPONENT_SAT_COM, MSG_STATE_RESPONSE);
-
-    return sat;
-}
-
-void sat_com_cleanup(SatCom* sat) {
-    if (!sat) return;
+static void send_status_update(SatCom* sat, bool connected) {
+    Message msg = {0};
+    msg.header.type = MSG_SYSTEM_STATUS;
+    msg.header.sender = COMPONENT_SAT_COM;
+    msg.header.receiver = COMPONENT_FLIGHT_CONTROLLER;
+    msg.header.timestamp = time(NULL);
+    msg.header.message_size = sizeof(SystemStatusMsg);
+    msg.payload.system_status.component_active = connected;
     
-    if (sat->socket_fd >= 0) {
-        close(sat->socket_fd);
+    if (bus_publish(sat->bus, &msg) != SUCCESS) {
+        LOG_ERROR(LOG_SATCOM, "Failed to publish status update");
+    } else {
+        LOG_INFO(LOG_SATCOM, "Published status: %s", connected ? "CONNECTED" : "DISCONNECTED");
     }
-    free(sat);
 }
 
-static void try_connect(SatCom* sat) {
-    if (sat->connected) return;
+static bool try_connect(SatCom* sat) {
+    if (sat->connected) return true;
 
+    LOG_INFO(LOG_SATCOM, "Attempting to connect to %s:%d", SATCOM_HOST, SATCOM_PORT);
+    
     int result = connect(sat->socket_fd, 
                         (struct sockaddr*)&sat->server_addr, 
                         sizeof(sat->server_addr));
 
     if (result == 0 || (result < 0 && errno == EISCONN)) {
         sat->connected = true;
-        fprintf(stderr, "SATCOM: Connected to ground station\n");
+        LOG_INFO(LOG_SATCOM, "Connected to ground station");
+        send_status_update(sat, true);
+        return true;
     }
-}
-
-static void handle_waypoint(SatCom* sat, const Waypoint* waypoint) {
-    // Send autopilot command with new target
-    Message msg = {0};
-    msg.header.type = MSG_AUTOPILOT_COMMAND;
-    msg.header.sender = COMPONENT_SAT_COM;
-    msg.header.receiver = COMPONENT_AUTOPILOT;
-    msg.header.timestamp = time(NULL);
-    msg.header.message_size = sizeof(AutopilotCommandMsg);
-
-    msg.payload.autopilot_command.target_altitude = waypoint->position.altitude;
-    msg.payload.autopilot_command.target_heading = waypoint->heading;
-    msg.payload.autopilot_command.target_speed = waypoint->speed;
-
-    bus_publish(sat->bus, &msg);
-}
-
-static void handle_emergency(SatCom* sat, EmergencyCommand cmd) {
-    Message msg = {0};
-    msg.header.type = MSG_AUTOPILOT_COMMAND;
-    msg.header.sender = COMPONENT_SAT_COM;
-    msg.header.receiver = COMPONENT_AUTOPILOT;
-    msg.header.timestamp = time(NULL);
-
-    switch (cmd) {
-        case EMERGENCY_RETURN_TO_BASE:
-            // Set course to home base
-            msg.payload.autopilot_command.target_heading = 280.0;  // SFO runway heading
-            msg.payload.autopilot_command.target_altitude = 3000.0;
-            msg.payload.autopilot_command.target_speed = 200.0;
-            break;
-
-        case EMERGENCY_CLIMB_TO_SAFE_ALTITUDE:
-            msg.payload.autopilot_command.target_altitude = 
-                sat->current_state.position.altitude + 5000.0;  // Climb 5000 feet
-            break;
-
-        case EMERGENCY_LAND_IMMEDIATELY:
-            // Find nearest airport logic would go here
-            // For now, just descend
-            msg.payload.autopilot_command.target_altitude = 
-                sat->current_state.position.altitude - 1000.0;
-            msg.payload.autopilot_command.target_speed = 150.0;
-            break;
-
-        default:
-            return;
+    
+    if (result < 0 && (errno != EINPROGRESS && errno != EALREADY && 
+                       errno != EWOULDBLOCK)) {
+        LOG_ERROR(LOG_SATCOM, "Connect error: %s", strerror(errno));
+        close(sat->socket_fd);
+        init_socket(sat);
     }
 
-    bus_publish(sat->bus, &msg);
-}
-
-static void handle_weather(SatCom* sat, const WeatherInfo* weather) {
-    // Adjust flight parameters based on weather
-    // For example, reduce speed in turbulence
-    if (weather->turbulence > 5.0) {
-        Message msg = {0};
-        msg.header.type = MSG_AUTOPILOT_COMMAND;
-        msg.header.sender = COMPONENT_SAT_COM;
-        msg.header.receiver = COMPONENT_AUTOPILOT;
-        msg.header.timestamp = time(NULL);
-
-        // Reduce speed by 20% in turbulence
-        msg.payload.autopilot_command.target_speed = 
-            sat->current_state.speed * 0.8;
-
-        bus_publish(sat->bus, &msg);
-    }
+    return false;
 }
 
 // Parse satellite message from sender
 static bool parse_sat_message(const char* buffer, SatelliteMessage* msg) {
-    // Expected format: "TYPE,DATA1,DATA2,..."
     char type_str[32];
     if (sscanf(buffer, "%31[^,]", type_str) != 1) {
         return false;
@@ -178,14 +117,17 @@ static bool parse_sat_message(const char* buffer, SatelliteMessage* msg) {
     if (strcmp(type_str, "WAYPOINT") == 0) {
         msg->type = SAT_MSG_WAYPOINT;
         Waypoint* wp = &msg->data.waypoint;
-        return sscanf(data, "%lf,%lf,%lf,%lf,%lf,%u,%d",
+        int is_final_int = 0;  // Use int for scanf
+        int result = sscanf(data, "%lf,%lf,%lf,%lf,%lf,%u,%d",
                      &wp->position.latitude,
                      &wp->position.longitude,
                      &wp->position.altitude,
                      &wp->speed,
                      &wp->heading,
                      &wp->eta,
-                     &wp->is_final) == 7;
+                     &is_final_int);
+        wp->is_final = (bool)is_final_int;  // Convert to bool after
+        return result == 7;
     }
     else if (strcmp(type_str, "WEATHER") == 0) {
         msg->type = SAT_MSG_WEATHER;
@@ -208,8 +150,57 @@ static bool parse_sat_message(const char* buffer, SatelliteMessage* msg) {
     return false;
 }
 
+SatCom* sat_com_init(Bus* bus) {
+    LOG_INFO(LOG_SATCOM, "Starting initialization");
+    
+    if (!bus) {
+        LOG_ERROR(LOG_SATCOM, "NULL bus in init");
+        return NULL;
+    }
+
+    SatCom* sat = malloc(sizeof(SatCom));
+    if (!sat) {
+        LOG_ERROR(LOG_SATCOM, "Failed to allocate memory");
+        return NULL;
+    }
+
+    sat->bus = bus;
+    sat->connected = false;
+    memset(&sat->last_message, 0, sizeof(SatelliteMessage));
+    memset(&sat->current_state, 0, sizeof(FlightState));
+
+    if (!init_socket(sat)) {
+        LOG_ERROR(LOG_SATCOM, "Socket initialization failed");
+        free(sat);
+        return NULL;
+    }
+
+    // Subscribe to state updates from flight controller
+    ErrorCode err = bus_subscribe(bus, COMPONENT_SAT_COM, MSG_STATE_RESPONSE);
+    if (err != SUCCESS) {
+        LOG_ERROR(LOG_SATCOM, "Failed to subscribe to state responses: %d", err);
+        free(sat);
+        return NULL;
+    }
+
+    // Send initial status update
+    send_status_update(sat, false);
+
+    LOG_INFO(LOG_SATCOM, "Initialization complete");
+    return sat;
+}
+
 void sat_com_process(SatCom* sat) {
     if (!sat) return;
+
+    static time_t last_status_update = 0;
+    time_t now = time(NULL);
+
+    // Send periodic status updates
+    if (now - last_status_update >= STATUS_UPDATE_INTERVAL_S) {
+        send_status_update(sat, sat->connected);
+        last_status_update = now;
+    }
 
     // Try to connect if not connected
     if (!sat->connected) {
@@ -223,59 +214,33 @@ void sat_com_process(SatCom* sat) {
 
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0';
-        
         SatelliteMessage msg;
         if (parse_sat_message(buffer, &msg)) {
-            sat->last_message = msg;
-
-            // Handle different message types
-            switch (msg.type) {
-                case SAT_MSG_WAYPOINT:
-                    handle_waypoint(sat, &msg.data.waypoint);
-                    break;
-
-                case SAT_MSG_WEATHER:
-                    handle_weather(sat, &msg.data.weather);
-                    break;
-
-                case SAT_MSG_EMERGENCY:
-                    handle_emergency(sat, msg.data.emergency);
-                    break;
-
-                case SAT_MSG_STATUS_REQ:
-                    // Send current state back to ground station
-                    // Implementation would go here
-                    break;
-
-                default:
-                    break;
-            }
+            // Process the message based on type...
         }
     } else if (bytes_read == 0 || (bytes_read < 0 && errno != EWOULDBLOCK)) {
         // Connection closed or error
-        fprintf(stderr, "SATCOM: Connection lost, attempting to reconnect...\n");
+        LOG_ERROR(LOG_SATCOM, "Connection lost: %s", 
+                bytes_read == 0 ? "Closed by peer" : strerror(errno));
         close(sat->socket_fd);
-        init_socket(sat);
-        sat->connected = false;
-    }
-
-    // Process messages from flight controller
-    Message msg;
-    while (bus_read_message(sat->bus, COMPONENT_SAT_COM, &msg)) {
-        if (msg.header.type == MSG_STATE_RESPONSE) {
-            memcpy(&sat->current_state, &msg.payload, sizeof(FlightState));
+        if (sat->connected) {
+            sat->connected = false;
+            send_status_update(sat, false);
         }
+        init_socket(sat);
     }
 }
 
 void sat_com_main(Bus* bus) {
+    LOG_INFO(LOG_SATCOM, "Starting main function");
+
     SatCom* sat = sat_com_init(bus);
     if (!sat) {
-        fprintf(stderr, "Failed to initialize SATCOM\n");
+        LOG_ERROR(LOG_SATCOM, "Failed to initialize");
         return;
     }
 
-    fprintf(stderr, "SATCOM started\n");
+    LOG_INFO(LOG_SATCOM, "Entering main loop");
 
     while (1) {
         sat_com_process(sat);

@@ -16,6 +16,7 @@
 #define KNOTS_TO_MS 0.51444   // Convert knots to meters/second
 
 // Component IDs must be less than MAX_COMPONENTS (5)
+
 typedef enum {
     COMPONENT_FLIGHT_CONTROLLER = 0,
     COMPONENT_AUTOPILOT = 1,
@@ -50,7 +51,7 @@ typedef enum {
 } ErrorCode;
 
 // Configuration constants
-#define MAX_COMPONENTS 5
+#define MAX_COMPONENTS 6
 
 // Validation macros
 #define VALIDATE_COMPONENT_ID(id) ((id) >= 0 && (id) < MAX_COMPONENTS)
